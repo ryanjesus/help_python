@@ -1,0 +1,78 @@
+import pandas as pd
+import pyodbc
+import os
+import glob
+
+def mapear_tipo_sql(valor):
+    return 'VARCHAR(255)'
+
+# Configurações
+pasta = '/home/ryanoliveira/Trabalho/arquivos/'
+padrao_arquivos = os.path.join(pasta, '*.xlsx')
+chunk_size = 10000
+
+# Conexão com SQL Server via pyodbc
+conn_str = (
+    "DRIVER={ODBC Driver 17 for SQL Server};"
+    "SERVER=;"
+    "DATABASE=;"
+    "UID=;"
+    "PWD=;"
+    "TrustServerCertificate=yes;"
+)
+conn = pyodbc.connect(conn_str)
+cursor = conn.cursor()
+cursor.fast_executemany = True
+
+for caminho_arquivo in glob.glob(padrao_arquivos):
+    nome_arquivo = os.path.basename(caminho_arquivo)
+    nome_tabela = os.path.splitext(nome_arquivo)[0]
+
+    print(f"\n📄 Processando: {nome_arquivo} -> tabela: {nome_tabela}")
+    df = pd.read_excel(caminho_arquivo, header=0)
+
+    # Limpeza de colunas
+    colunas_tratadas = []
+    for i, col in enumerate(df.columns):
+        if pd.isna(col) or str(col).strip() == '':
+            novo_nome = f'coluna_sem_nome_{i}'
+        else:
+            novo_nome = str(col).strip().replace('\n', '_').replace(' ', '_')
+        colunas_tratadas.append(novo_nome)
+    df.columns = colunas_tratadas
+
+    if len(set(df.columns)) != len(df.columns):
+        raise ValueError(f"⚠️ Arquivo '{nome_arquivo}' contém colunas duplicadas após limpeza.")
+
+    df = df.where(pd.notnull(df), None)
+
+    colunas = df.columns
+    tipos = [mapear_tipo_sql(df[col]) for col in colunas]
+    colunas_sql = ',\n  '.join(f'[{col}] {tipo}' for col, tipo in zip(colunas, tipos))
+
+    sql_create = f"CREATE TABLE [{nome_tabela}] (\n  {colunas_sql}\n);"
+    cursor.execute(f"IF OBJECT_ID('{nome_tabela}', 'U') IS NOT NULL DROP TABLE [{nome_tabela}]")
+    cursor.execute(sql_create)
+
+    placeholders = ', '.join(['?'] * len(colunas))
+    sql_insert = f"INSERT INTO [{nome_tabela}] ({', '.join(f'[{c}]' for c in colunas)}) VALUES ({placeholders})"
+
+    total_linhas = len(df)
+    print(f"📦 Inserindo {total_linhas} linhas em chunks de {chunk_size}...")
+
+    for i in range(0, total_linhas, chunk_size):
+        chunk = df.iloc[i:i+chunk_size]
+        valores = [tuple(row[c] for c in colunas) for _, row in chunk.iterrows()]
+        try:
+            cursor.executemany(sql_insert, valores)
+            print(f"✅ Chunk {i} até {i+len(chunk)} inserido.")
+        except Exception as e:
+            print(f"❌ Erro no chunk {i}-{i+len(chunk)}: {e}")
+            raise e
+
+    conn.commit()
+    print(f"✅ Tabela '{nome_tabela}' criada e populada.")
+
+cursor.close()
+conn.close()
+print("\n🏁 Todos os arquivos foram processados com sucesso.")
